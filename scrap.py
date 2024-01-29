@@ -1,11 +1,15 @@
 import csv
 import time
+from datetime import datetime
+import os
+from email.message import EmailMessage
+import smtplib
+import sys
 
 import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-
 
 def get_webpage_html(url:str)-> str:
    # Type GET request
@@ -37,9 +41,9 @@ def get_info_from_offer(soup, offer_link)-> list:
     compagny_name = soup.find('div', class_='sc-bXCLTC jYvPbE').text
 
     # Organizing columns names in a list
-    column_names = ['Titre', 'Contrat', 'Localisation', 'Salary', 'Start Date', 'Télétravail', 'Etudes', 'Experience', 'Compagny']
+    column_names = ['Date de la collection', 'Titre', 'Contrat', 'Localisation', 'Salary', 'Start Date', 'Télétravail', 'Etudes', 'Experience', 'Compagny']
     # Organizing variables in a list 
-    job_data = [job_title, contract_type, job_location, salary, start_date, remote_work, education_level, experience_needed, compagny_name]
+    job_data = [datetime.now().strftime("%Y-%m-%d"),job_title, contract_type, job_location, salary, start_date, remote_work, education_level, experience_needed, compagny_name]
     
     return job_data, column_names
 
@@ -64,12 +68,6 @@ def scrape_data_from_job_offer(offer_link:str, job_offers_csv_path:str):
     # Save results to csv
     add_line_to_csv(job_data, column_names, job_offers_csv_path)
 
-
-# Intialize a Chrome object
-#driver = webdriver.Chrome(r'c:/Users/daoud/Desktop/Moudoski/Défi/Projet_jobs_webscraper/drivers/chromedriver.exe')
-#options = webdriver.ChromeOptions()
-# Ajoutez des options au besoin
-#driver = webdriver.Chrome(executable_path=r'c:/Users/daoud/Desktop/Moudoski/Défi/Projet_jobs_webscraper/drivers/chromedriver.exe', options=options)
 def get_dynamic_page_content(target_url:str)-> str:
     
     # Intialize a Chrome object
@@ -93,6 +91,9 @@ def get_job_links_list(soup:BeautifulSoup):
     #find the ordered list 
     job_list = soup.find('ol', class_="sc-1wqurwm-0 cCiCwl ais-Hits-list")
     
+    if job_list is None:
+        print("Aucune liste d'offres d'emploi trouvée.")
+        return []
     # Create an empty list for links
     job_links = []
     
@@ -104,7 +105,10 @@ def get_job_links_list(soup:BeautifulSoup):
 
 def scrape_job_offer_data_from_keywords(keywords:str, csv_path:str):
     # Get search page dynamic content with selenium
-    search_page_content = get_dynamic_page_content(f"https://www.welcometothejungle.com/fr/jobs?&query={keywords.split()[0]}%20{keywords.split()[1]}")
+    base_url = "https://www.welcometothejungle.com/fr/jobs?"
+    search_query = "%20".join(keywords.split())
+    search_page_content = get_dynamic_page_content(f"{base_url}&query={search_query}")
+    #search_page_content = get_dynamic_page_content(f"https://www.welcometothejungle.com/fr/jobs?&query={keywords.split()[0]}%20{keywords.split()[1]}")
 
     # Initialize a BS object
     soup = BeautifulSoup(search_page_content, "lxml")
@@ -114,25 +118,82 @@ def scrape_job_offer_data_from_keywords(keywords:str, csv_path:str):
 
     # Loop over the links to fill the csv 
     for i, job_offer in enumerate(job_links):
-        print(i, job_offer)
+        #print(i, job_offer)
         scrape_data_from_job_offer(job_offer, csv_path)
         time.sleep(1)
+    print(f"Fin du scraping des {i} offres")
 
-keywords = "Développeur Python"
-csv_path = "jobl_offres.csv"
-# fill up csv
+def send_email_with_csv(dest_email: str, csv_path: str, keywords: str)-> None:
+    count_new = get_rid_of_duplicates(csv_path)
+    msg = create_email_message(dest_email, keywords, count_new)
+    msg = attach_csv_file_to_message(msg, csv_path)
+    send_email(msg)
+
+def create_email_message(dest_email: str, keywords: str, count: int)-> EmailMessage:
+    msg = EmailMessage()
+    # Set the header infos (sender, recipient, subject)
+    #msg['From'] = "koned4490@gmail.com"
+    #msg['To'] = "koned4490@gmail.com"
+    msg['From'] = dest_email
+    msg['To'] = dest_email
+    msg['Subject'] = "Nouvelles offres d'emploi"
+    # Set the body of the email
+    msg.set_content(f"{count} nouvelles offres d'emploi sont apparues pour la recherche {keywords}")
+    return msg
+
+def attach_csv_file_to_message(msg: EmailMessage, csv_path:str)-> EmailMessage:
+    # Open the CSV file in binary mode and read its contents
+    with open(csv_path, 'rb') as f:
+        job_offer_data = f.read()
+    msg.add_attachment(job_offer_data, maintype='text', subtype='csv', filename=csv_path)
+    
+    return msg
+
+#print(msg.as_string())
+def send_email(msg:EmailMessage)-> None:
+    # Send the email using SMTP
+    with smtplib.SMTP('smtp.gmail.com', 587) as smtp:
+        smtp.starttls()
+        smtp.login(os.environ['EMAIL_USER'],
+                os.environ['EMAIL_PASSWORD'])
+        smtp.send_message(msg)
+        print('Fin Email send ok')
+
+def get_rid_of_duplicates(csv_path: str) -> int:
+    new_offers_count = 0
+    existing_data = set()
+
+    # Read data from the CSV file
+    with open(csv_path, 'r', newline='', encoding='utf-8') as csv_file:
+        reader = csv.reader(csv_file)
+        header = next(reader, None)  # Skip the header
+        for row in reader:
+            offer = tuple(row)
+            if offer not in existing_data:
+                existing_data.add(offer)
+                new_offers_count += 1
+
+    # Write updated data back to the CSV file
+    with open(csv_path, 'w', newline='', encoding='utf-8') as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(header)
+        writer.writerows(existing_data)
+
+    return new_offers_count
+
+def read_arg_keywords_from_command_line():
+    try:
+        keywords_param = sys.argv[1].lower()
+    except : 
+        print('Veuillez préciser des mots-clés de recherche')
+        print('Ex: scrap.py "Développeur Python"')
+        sys.exit()
+    
+    return keywords_param
+
+# Parameters
+keywords = read_arg_keywords_from_command_line()
+csv_path = f"job_offers_{keywords.replace(' ', '_')}.csv"
+
 scrape_job_offer_data_from_keywords(keywords, csv_path)
-
-# 
-# 
-# 
-# 
-# 
-# job_offer_list = ["https://www.welcometothejungle.com/fr/companies/datascientest/jobs/custumer-success-manager-h-f-stage_puteaux?q=011dba3582a54e3bef6bb0a10181085c&o=3ea98bb2-d117-4cdf-aaaf-c969046fda2f",
-                 # "https://www.welcometothejungle.com/fr/companies/margo/jobs/margo-analytics-data-scientist-h-f_paris",
-                 # "https://www.welcometothejungle.com/fr/companies/tata-consultancy-services/jobs/stagiaire-developpeur-python-oriente-frameworks-ai-h-f_puteaux?q=71730fd2b908590ff22b85d287cd8a3d&o=c589c8ef-7318-4836-af6a-6b63df6fba03"]
-
-#
-# 
-# for offer_link in job_offer_list:
-   # scrape_data_from_job_offer(offer_link, 'jobs_offers.csv')
+send_email_with_csv(os.environ['EMAIL_USER'], csv_path, keywords)
